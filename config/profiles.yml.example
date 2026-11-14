@@ -1,0 +1,14 @@
+cafeteria_food_waste:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: "{{ env_var('DBT_BIGQUERY_METHOD', 'oauth') }}"
+      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      dataset: "{{ env_var('BIGQUERY_STAGING_DATASET', 'food_waste_staging') }}"
+      location: "{{ env_var('BIGQUERY_LOCATION', 'US') }}"
+      threads: 4
+      timeout_seconds: 300
+      priority: interactive
+      retries: 1
+      keyfile: "{{ env_var('DBT_BIGQUERY_KEYFILE', '') }}"

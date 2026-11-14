@@ -1,0 +1,11 @@
+# Application and local data inspection dependencies
+streamlit==1.41.1
+google-cloud-bigquery==3.27.0
+db-dtypes==1.9.0
+google-auth==2.37.0
+python-dotenv[cli]==1.0.1
+pandas==2.3.3
+dbt-core==1.9.1
+dbt-bigquery==1.9.1
+
+# Airflow has its own pinned dependency set in airflow/requirements.txt.

@@ -1,0 +1,8 @@
+version: 2
+sources:
+  - name: raw
+    database: "{{ env_var('GCP_PROJECT_ID') }}"
+    schema: "{{ env_var('BIGQUERY_RAW_DATASET', 'food_waste_raw') }}"
+    tables:
+      - name: food_waste_records
+        identifier: "{{ env_var('BIGQUERY_RAW_TABLE', 'food_waste_records') }}"

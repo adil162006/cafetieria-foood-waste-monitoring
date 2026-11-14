@@ -1,0 +1,19 @@
+version: 2
+models:
+  - name: stg_food_waste
+    description: Cleaned source data; invalid/unparseable required keys and negative/null waste are excluded.
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: waste_date
+        tests: [not_null]
+      - name: food_waste_kg
+        tests: [not_null]
+      - name: waste_category
+        tests:
+          - accepted_values:
+              values: ['Meat', 'Dairy', 'Vegetables', 'Grains', 'Unknown']
+      - name: staff_experience
+        tests:
+          - accepted_values:
+              values: ['Beginner', 'Intermediate', 'Expert', 'Unknown']

@@ -1,0 +1,16 @@
+name: cafeteria_food_waste
+version: '1.0.0'
+config-version: 2
+profile: cafeteria_food_waste
+model-paths: [models]
+test-paths: [tests]
+clean-targets: [target, dbt_packages]
+
+models:
+  cafeteria_food_waste:
+    staging:
+      +materialized: view
+      +schema: "{{ env_var('BIGQUERY_STAGING_DATASET', 'food_waste_staging') }}"
+    analytics:
+      +materialized: table
+      +schema: "{{ env_var('BIGQUERY_ANALYTICS_DATASET', 'food_waste_analytics') }}"

@@ -1,0 +1,33 @@
+services:
+  airflow:
+    build:
+      context: ../..
+      dockerfile: docker/airflow/Dockerfile
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      AIRBYTE_API_URL: ${AIRBYTE_API_URL:-http://host.docker.internal:8000/api/public/v1}
+      AIRBYTE_API_TOKEN: ${AIRBYTE_API_TOKEN:-}
+      AIRBYTE_API_CLIENT_ID: ${AIRBYTE_API_CLIENT_ID:-}
+      AIRBYTE_API_CLIENT_SECRET: ${AIRBYTE_API_CLIENT_SECRET:-}
+      AIRBYTE_CONNECTION_ID: ${AIRBYTE_CONNECTION_ID:-}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      BIGQUERY_LOCATION: ${BIGQUERY_LOCATION:-US}
+      BIGQUERY_RAW_TABLE: ${BIGQUERY_RAW_TABLE:-food_waste_records}
+      BIGQUERY_ANALYTICS_DATASET: ${BIGQUERY_ANALYTICS_DATASET:-food_waste_analytics}
+      BIGQUERY_STAGING_DATASET: ${BIGQUERY_STAGING_DATASET:-food_waste_staging}
+      BIGQUERY_RAW_DATASET: ${BIGQUERY_RAW_DATASET:-food_waste_raw}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/servicekey.json
+      DBT_BIGQUERY_METHOD: service-account
+      DBT_BIGQUERY_KEYFILE: /run/secrets/servicekey.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../../airflow/dags:/opt/airflow/dags
+      - ../../dbt:/opt/food-waste/dbt
+      - ../../config/profiles.yml:/home/airflow/.dbt/profiles.yml:ro
+      - ../../servicekey.json:/run/secrets/servicekey.json:ro
+    restart: unless-stopped
