@@ -1,6 +1,6 @@
 # Cafeteria Food Waste Monitoring and Analytics
 
-This runbook explains the complete setup from the existing workspace through a verified dashboard. The pipeline uses Airbyte to load the supplied CSV, BigQuery for the warehouse, dbt SQL for transformations, Airflow for orchestration, and Streamlit for the manager dashboard. It analyzes observed food waste; it does not train models or forecast.
+This runbook explains the complete setup from the existing workspace through a verified dashboard. Airbyte loads the supplied CSV, BigQuery stores raw and modeled data, dbt SQL transforms it, Airflow orchestrates the pipeline, and a standalone HTML/CSS/JavaScript frontend displays the results. A small local Python HTTP API serves the HTML and runs only fixed BigQuery queries. The browser never receives cloud credentials. The project analyzes observed waste and does not predict or forecast.
 
 ## Before you start
 
@@ -23,13 +23,14 @@ flowchart LR
   AB --> RAW[(BigQuery raw)]
   RAW --> STG[dbt staging]
   STG --> AN[dbt analytics]
-  AN --> UI[Streamlit dashboard]
+  AN --> API[Local Python BigQuery API]
+  API --> UI[Standalone HTML dashboard and interactive charts]
   AF[Airflow orchestrator] -. triggers and monitors .-> AB
   AF -. runs dbt and tests .-> STG
   AF -. validates output .-> AN
 ```
 
-Airbyte performs ingestion, dbt performs SQL transformations, BigQuery stores raw and modeled data, Airflow coordinates the steps, and Streamlit reads only transformed tables.
+Airbyte ingests, dbt transforms with SQL, BigQuery stores the warehouse layers, Airflow coordinates the workflow, and the Python API reads only transformed analytics tables for the HTML app. Chart.js renders interactive line, doughnut, bar and scatter charts in the browser.
 
 ## Project files
 
@@ -38,15 +39,13 @@ train.csv
 airflow/dags/airbyte_api.py
 airflow/dags/cafeteria_food_waste_pipeline.py
 airflow/requirements.txt
+backend/server.py and backend/queries.py
+frontend/index.html, frontend/styles.css, frontend/app.js
 dbt/dbt_project.yml
 dbt/models/sources.yml
 dbt/models/staging/
 dbt/models/analytics/
 dbt/tests/
-streamlit/app.py
-streamlit/components/
-streamlit/queries/
-streamlit/utils/
 scripts/inspect_dataset.py
 tests/
 config/profiles.yml.example
@@ -79,7 +78,7 @@ You will configure these values in a local .env file. It is ignored by Git.
 | DBT_BIGQUERY_METHOD | service-account for the documented setup |
 | DBT_BIGQUERY_KEYFILE | ./servicekey.json locally; Compose uses the container mount |
 
-The existing servicekey.json is reused by local Streamlit, dbt, Airflow, and Airbyte's BigQuery destination. The file is not read into this documentation, copied, renamed, or moved. Airbyte stores its destination credential in its own connection configuration. Do not put JSON contents in .env or source code.
+The existing servicekey.json is reused by the local BigQuery API, dbt, Airflow, and Airbyte's BigQuery destination. The file is not read into this documentation, copied, renamed, or moved. The browser only calls the same-origin local API and never receives the key. Airbyte stores its destination credential in its own configuration. Do not put JSON contents in .env or source code.
 
 ## 1. Activate the existing environment and install packages
 
@@ -92,9 +91,9 @@ python --version
 python -m pip install -r requirements.txt
 ```
 
-Do not create another venv. requirements.txt installs Streamlit, BigQuery client/authentication, pandas, dbt Core, and dbt-bigquery into this existing venv. The separate Airflow image installs the dependencies in airflow/requirements.txt.
+Do not create another venv. requirements.txt installs the BigQuery client/authentication, dotenv configuration, and dbt Core/dbt-bigquery into the existing venv. The separate Airflow image installs its own dependencies from airflow/requirements.txt. The HTML frontend uses Chart.js from its pinned CDN URL and needs internet access in the browser for interactive charts.
 
-The local venv is Python 3.14.7. The pinned dbt 1.9 adapter is not compatible with Python 3.14, so run dbt in the provided Airflow Python 3.11 container as described below. Streamlit, the CSV inspection utility, and the unit tests can use the existing venv.
+The local venv is Python 3.14.7. The pinned dbt 1.9 adapter is not compatible with Python 3.14, so run dbt in the provided Airflow Python 3.11 container as described below. The standalone HTML API, CSV inspection utility, and unit tests use the existing venv.
 
 ## 2. Create the local environment file
 
@@ -195,17 +194,17 @@ docker compose -f docker/airflow/docker-compose.yml exec airflow dbt build --pro
 
 The DAG normally runs dbt build for you; manual commands are for checking dbt or running it outside a DAG run.
 
-## 7. Start Streamlit
+## 7. Start the standalone HTML dashboard
 
 After a successful DAG run, return to PowerShell in the project root with .venv activated:
 
 ```powershell
-streamlit run streamlit/app.py
+python -m backend.server
 ```
 
-Open http://localhost:8501. Streamlit loads .env and authenticates to BigQuery with GOOGLE_APPLICATION_CREDENTIALS. The dashboard displays total waste, meals, weighted waste per meal, category count, daily trend, category distribution, and monthly trend. The chat screen accepts the six listed questions exactly, shows the generated predefined SQL, and queries only dbt analytics tables. Arbitrary user-entered SQL is never executed. To use another port, add --server.port PORT to the Streamlit command.
+Open http://127.0.0.1:8501. The Python API loads .env and authenticates to BigQuery with the existing servicekey.json. It serves the standalone files in frontend/ and provides same-origin JSON endpoints. The dashboard displays live KPI totals, daily and monthly trends, category comparisons, and a recent-record table. Interactive Chart.js charts support hover details and legends. The question panel offers six predefined queries and shows each query's SQL for transparency. It never accepts arbitrary SQL. The API listens only on 127.0.0.1 by default; use DASHBOARD_PORT in .env to change the port.
 
-To stop Streamlit, press Ctrl+C in its PowerShell window.
+To stop the dashboard, press Ctrl+C in its PowerShell window. No Streamlit process or server is used.
 
 ## 8. Verify the project
 
@@ -216,7 +215,7 @@ python scripts/inspect_dataset.py
 python -m unittest discover -s tests -v
 ```
 
-The tests cover the actual CSV schema/counts, mock the Airbyte API, mock BigQuery query execution, and start the Streamlit page without cloud credentials. Cloud sync, BigQuery execution, dbt build, and Airflow execution require your configured accounts/services; they were not run in this workspace.
+The tests cover the actual CSV schema/counts, mock Airbyte API calls, verify fixed analytics queries and JSON conversion, and check the standalone frontend. Cloud sync, dbt build, and Airflow execution require the existing configured services.
 
 ## Complete run order checklist
 
@@ -227,7 +226,7 @@ The tests cover the actual CSV schema/counts, mock the Airbyte API, mock BigQuer
 5. Open the already running local Airbyte instance. Reuse its File source, BigQuery destination, and connection if configured. Select the existing servicekey.json for the destination, verify the local CSV source/mount, run one sync, and fill in the existing connection ID and API credentials if authentication is enabled.
 6. From the project root, build/start Airflow with the Docker Compose commands.
 7. Open Airflow, trigger the DAG, monitor tasks, and verify all analytics tables contain rows.
-8. Start Streamlit and review the dashboard/chat questions.
+8. Start the HTML/API server and review the dashboard/questions at http://127.0.0.1:8501.
 9. When finished, stop Airflow. Leave the existing Airbyte deployment running.
 
 To stop the Airflow container while keeping its persisted state:
@@ -261,10 +260,12 @@ CSV fields are text. The inspection utility reports physical CSV types, inferred
 - dbt authentication fails: check the service-account path, role grants, project ID, API enablement, and BigQuery location.
 - Airflow cannot connect to Airbyte: within a container, localhost refers to that same container. For local Airbyte use host.docker.internal in AIRBYTE_API_URL.
 - Airflow has no profile or key file: create config/profiles.yml and check that GOOGLE_APPLICATION_CREDENTIALS points to an existing local file Compose can mount.
-- Streamlit shows a BigQuery error: confirm Airbyte sync and DAG build succeeded, .env values are correct, the key file is readable, and the analytics tables have data.
+- Dashboard API shows a BigQuery error: confirm Airbyte sync and DAG build succeeded, .env values are correct, servicekey.json is readable, and analytics tables have data.
+- Browser charts do not appear: check that the browser has internet access for the pinned Chart.js CDN script, then refresh the page.
+- Port 8501 is occupied: set DASHBOARD_PORT to another local port in .env, restart `python -m backend.server`, and open that port in the browser.
 - Docker Compose commands report missing files: execute them from project root and ensure config/profiles.yml and the credentials path exist.
 
 ## Security and limitations
 
-Never commit .env, servicekey.json, API client secrets, or access tokens. servicekey.json is explicitly ignored by Git and remains in its current location. The dataset is a static CSV snapshot; the connection uses full refresh overwrite. No test.csv is included. The project has no ML/forecasting. Existing Airbyte and BigQuery services require the configured connection/project values; no external execution result is fabricated.
+Never commit .env, servicekey.json, API client secrets, or access tokens. servicekey.json is explicitly ignored by Git and remains in its current location. The local API binds to loopback and exposes only fixed query endpoints; do not expose it to an untrusted network. The dataset is a static CSV snapshot; the connection uses full refresh overwrite. No test.csv is included. There is no ML or forecasting. Existing Airbyte and BigQuery services require configured connection/project values; no external execution result is fabricated.
 

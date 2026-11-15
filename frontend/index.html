@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7f2">
+  <title>Cafeteria Waste | Operations Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Cafeteria analytics home">
+        <span class="brand-mark">CW</span>
+        <span><strong>GoodMeasure</strong><small>FOOD OPERATIONS</small></span>
+      </a>
+      <div class="side-label">WORKSPACE</div>
+      <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span> Overview</a>
+      <a class="nav-item" href="#analytics"><span class="nav-icon">◷</span> Waste trends</a>
+      <a class="nav-item" href="#ask"><span class="nav-icon">✳</span> Ask analytics</a>
+      <div class="sidebar-spacer"></div>
+      <div class="data-source"><span class="status-dot"></span><span><b>BigQuery connected</b><small>Analytics warehouse</small></span></div>
+      <div class="sidebar-foot">CAFETERIA WASTE MONITORING<br>DESCRIPTIVE ANALYTICS</div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumbs">Operations <span>/</span> Food waste</div>
+        <div class="top-actions"><span id="updated-at" class="updated-at">Connecting to warehouse…</span><button id="refresh-button" class="icon-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button></div>
+      </header>
+
+      <section id="overview" class="page-section">
+        <div class="page-heading">
+          <div><div class="eyebrow">CAFETERIA PERFORMANCE</div><h1>Food waste overview</h1><p class="subtitle">A clear view of what gets wasted, when, and alongside daily service.</p></div>
+          <span class="live-badge"><span class="status-dot"></span> LIVE WAREHOUSE DATA</span>
+        </div>
+
+        <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+        <div class="kpi-grid">
+          <article class="kpi-card"><div class="kpi-label">TOTAL FOOD WASTE</div><div id="kpi-waste" class="kpi-value">—</div><div class="kpi-note">Measured waste across all records</div><span class="kpi-decoration green">↗</span></article>
+          <article class="kpi-card"><div class="kpi-label">MEALS SERVED</div><div id="kpi-meals" class="kpi-value">—</div><div class="kpi-note">Total recorded meal demand</div><span class="kpi-decoration gold">◉</span></article>
+          <article class="kpi-card"><div class="kpi-label">WASTE PER MEAL</div><div id="kpi-per-meal" class="kpi-value">—</div><div class="kpi-note">Weighted average in kilograms</div><span class="kpi-decoration blue">⌁</span></article>
+          <article class="kpi-card"><div class="kpi-label">FOOD CATEGORIES</div><div id="kpi-categories" class="kpi-value">—</div><div class="kpi-note">Categories in the analytics layer</div><span class="kpi-decoration violet">▦</span></article>
+        </div>
+      </section>
+
+      <section id="analytics" class="page-section analytics-section">
+        <div class="section-heading"><div><div class="eyebrow">TRENDS & BREAKDOWNS</div><h2>Where the waste adds up</h2></div><span class="section-caption">Based on observed food waste records</span></div>
+        <div class="chart-grid">
+          <article class="panel chart-panel chart-wide"><div class="panel-heading"><div><h3>Daily waste</h3><p>Recorded kilograms by service date</p></div><span class="chart-tag">DAILY</span></div><div class="chart-area"><canvas id="daily-chart" aria-label="Daily food waste trend"></canvas></div></article>
+          <article class="panel chart-panel"><div class="panel-heading"><div><h3>Waste by category</h3><p>Share of measured total</p></div></div><div class="chart-area donut-area"><canvas id="category-chart" aria-label="Food waste by category"></canvas></div></article>
+          <article class="panel chart-panel"><div class="panel-heading"><div><h3>Monthly waste</h3><p>Monthly total in kilograms</p></div><span class="chart-tag">MONTHLY</span></div><div class="chart-area"><canvas id="monthly-chart" aria-label="Monthly food waste trend"></canvas></div></article>
+        </div>
+        <article class="panel table-panel"><div class="panel-heading"><div><h3>Recent daily summary</h3><p>Most recent service dates in the analytics table</p></div><span id="daily-row-count" class="row-count"></span></div><div class="table-wrap"><table><thead><tr><th>DATE</th><th>TOTAL WASTE</th><th>MEALS</th><th>WASTE / MEAL</th><th>AVG TEMP.</th><th>RECORDS</th></tr></thead><tbody id="daily-table"><tr><td colspan="6" class="empty-cell">Loading warehouse records…</td></tr></tbody></table></div></article>
+      </section>
+
+      <section id="ask" class="page-section ask-section">
+        <div class="section-heading"><div><div class="eyebrow">CONVERSATIONAL ANALYTICS</div><h2>Ask a business question</h2><p class="subtitle">Choose a supported question. Every answer uses a predefined BigQuery query.</p></div></div>
+        <article class="panel ask-panel">
+          <div class="ask-intro"><div class="ask-icon">✳</div><div><h3>What would you like to understand?</h3><p>Pick a question to query the analytics warehouse.</p></div></div>
+          <div class="ask-controls"><select id="question-select" aria-label="Choose an analytics question"><option value="">Choose a question…</option></select><button id="ask-button" class="primary-button">Get answer <span>→</span></button></div>
+          <div id="answer-area" class="answer-area" hidden><div id="answer-title" class="answer-title"></div><details class="sql-details"><summary>View generated SQL</summary><pre><code id="answer-sql"></code></pre></details><div id="answer-table" class="table-wrap answer-table"></div><div id="answer-chart" class="answer-chart" hidden><canvas id="answer-canvas" aria-label="Question results chart"></canvas></div></div>
+        </article>
+      </section>
+
+      <footer class="footer"><span>GoodMeasure · Cafeteria waste monitoring</span><span>Data engineering · BigQuery analytics</span></footer>
+    </main>
+  </div>
+</body>
+</html>

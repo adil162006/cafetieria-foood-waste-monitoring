@@ -1,8 +1,4 @@
-# Install using the Apache Airflow constraints file for the selected Python version.
-apache-airflow==2.10.4
-requests==2.32.3
+# dbt is installed in an isolated venv in the Airflow image so its dependencies
+# cannot conflict with Apache Airflow's pinned packages.
 dbt-core==1.9.1
 dbt-bigquery==1.9.1
-google-cloud-bigquery==3.27.0
-db-dtypes==1.9.0
-python-dotenv==1.0.1
