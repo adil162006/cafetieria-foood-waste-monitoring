@@ -1,88 +1,170 @@
-# Cafeteria Food Waste Monitoring and Analytics
+# Cafeteria Food Waste Analytics
 
-This runbook explains the complete setup from the existing workspace through a verified dashboard. Airbyte loads the supplied CSV, BigQuery stores raw and modeled data, dbt SQL transforms it, Airflow orchestrates the pipeline, and a standalone HTML/CSS/JavaScript frontend displays the results. A small local Python HTTP API serves the HTML and runs only fixed BigQuery queries. The browser never receives cloud credentials. The project analyzes observed waste and does not predict or forecast.
+A local data engineering project that loads the workspace CSV through the existing self-hosted Airbyte deployment, stores raw and transformed data in BigQuery, schedules ingestion and dbt with Airflow, and presents live analytics in a standalone HTML dashboard. The dashboard uses a small Python HTTP API to query BigQuery; credentials stay on the server and are never sent to the browser.
 
-## Before you start
+This project reports observed food waste. It does not make forecasts or generate synthetic dashboard data.
 
-You need:
+## Contents
 
-- Windows 10/11, VS Code, PowerShell, and the existing workspace virtual environment at .venv.
-- Python is already in that venv. It is Python 3.14.7 in this workspace.
-- Docker Desktop installed and running when you start Airbyte/Airflow.
-- Access to the existing Google Cloud project, BigQuery datasets, and the existing workspace servicekey.json.
-- The existing self-hosted local Airbyte deployment.
-- Network access for package downloads and Docker image pulls.
-
-The original train.csv stays at the workspace root and is never edited. Inspection found 911 records and 12 expected fields, no empty cells, no exact duplicate rows, and unique IDs. Some category/experience values have inconsistent casing; staff_experience contains 164 "nan" sentinels. See the Dataset section below.
+- [Architecture](#architecture)
+- [Project layout](#project-layout)
+- [Prerequisites](#prerequisites)
+- [Configuration and credentials](#configuration-and-credentials)
+- [One-time setup](#one-time-setup)
+- [Configure the existing Airbyte connection](#configure-the-existing-airbyte-connection)
+- [Run the pipeline](#run-the-pipeline)
+- [Run the HTML dashboard](#run-the-html-dashboard)
+- [Tests and validation](#tests-and-validation)
+- [Data model and cleaning](#data-model-and-cleaning)
+- [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
 
 ## Architecture
 
+### System architecture
+
 ```mermaid
 flowchart LR
-  CSV[train.csv] --> AB[Airbyte File CSV source]
-  AB --> RAW[(BigQuery raw)]
-  RAW --> STG[dbt staging]
-  STG --> AN[dbt analytics]
-  AN --> API[Local Python BigQuery API]
-  API --> UI[Standalone HTML dashboard and interactive charts]
-  AF[Airflow orchestrator] -. triggers and monitors .-> AB
-  AF -. runs dbt and tests .-> STG
-  AF -. validates output .-> AN
+    subgraph Local[Existing local Windows workspace and Docker services]
+        CSV[train.csv]
+        ABUI[Existing Airbyte deployment]
+        AF[Airflow scheduler and DAG]
+        API[Python dashboard API]
+        WEB[HTML, CSS, JavaScript]
+        CHARTS[Chart.js visualizations]
+        KEY[Existing servicekey.json]
+        ENV[Local .env configuration]
+    end
+
+    subgraph GCP[Existing Google Cloud project]
+        RAW[(BigQuery raw dataset)]
+        STG[(BigQuery staging view)]
+        MART[(BigQuery analytics tables)]
+    end
+
+    CSV -->|File source reads mounted CSV| ABUI
+    ABUI -->|BigQuery destination sync| RAW
+    AF -->|trigger and poll sync through local API| ABUI
+    AF -->|run dbt build and tests| STG
+    RAW -->|dbt staging model| STG
+    STG -->|dbt analytics models| MART
+    AF -->|check analytics tables have rows| MART
+    API -->|fixed, read-only analytics queries| MART
+    API -->|same-origin JSON| WEB
+    WEB --> CHARTS
+    ENV -. configuration .-> AF
+    ENV -. configuration .-> API
+    KEY -. mounted read-only / local auth .-> AF
+    KEY -. service account auth .-> API
+    KEY -. Airbyte destination credential .-> ABUI
 ```
 
-Airbyte ingests, dbt transforms with SQL, BigQuery stores the warehouse layers, Airflow coordinates the workflow, and the Python API reads only transformed analytics tables for the HTML app. Chart.js renders interactive line, doughnut, bar and scatter charts in the browser.
+The Airflow deployment is defined in `docker/airflow/docker-compose.yml`; it does not define or replace Airbyte. Continue using the Airbyte deployment that is already running. BigQuery is the only warehouse. The HTML files are served by the Python API, which returns JSON from fixed query templates. The browser does not receive the service account key and cannot submit arbitrary SQL.
 
-## Project files
+### Pipeline execution sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant A as Airflow DAG
+    participant B as Existing Airbyte API
+    participant G as BigQuery
+    participant D as dbt
+    participant P as Dashboard API
+    participant H as HTML dashboard
+
+    U->>A: Trigger cafeteria_food_waste_pipeline
+    A->>B: Start sync for configured connection
+    B-->>A: Job ID
+    loop Poll every 30 seconds
+        A->>B: Read sync job status
+        B-->>A: Running / success / failure
+    end
+    B->>G: Write CSV records to raw dataset
+    A->>D: Run dbt build (models and tests)
+    D->>G: Create staging view and analytics tables
+    A->>G: Validate analytics tables contain rows
+    U->>H: Open local dashboard URL
+    H->>P: Request dashboard and question endpoints
+    P->>G: Run fixed analytics queries
+    G-->>P: BigQuery results
+    P-->>H: JSON data
+    H->>H: Render KPIs, tables and Chart.js charts
+```
+
+## Project layout
 
 ```text
-train.csv
-airflow/dags/airbyte_api.py
-airflow/dags/cafeteria_food_waste_pipeline.py
-airflow/requirements.txt
-backend/server.py and backend/queries.py
-frontend/index.html, frontend/styles.css, frontend/app.js
-dbt/dbt_project.yml
-dbt/models/sources.yml
-dbt/models/staging/
-dbt/models/analytics/
-dbt/tests/
-scripts/inspect_dataset.py
-tests/
-config/profiles.yml.example
-docker/airflow/Dockerfile
-docker/airflow/docker-compose.yml
-.env.example
-.gitignore
-requirements.txt
-README.md
+.
+├── airflow/
+│   └── dags/                       # Airbyte API helper and pipeline DAG
+├── backend/
+│   ├── queries.py                  # Fixed BigQuery queries and JSON conversion
+│   └── server.py                   # Local HTML server and JSON API
+├── config/
+│   └── profiles.yml.example        # dbt BigQuery profile template
+├── dbt/
+│   ├── models/staging/             # Cleaned BigQuery staging view
+│   ├── models/analytics/           # Daily, category and monthly summaries
+│   └── tests/                      # Data quality assertions
+├── docker/airflow/
+│   ├── Dockerfile
+│   └── docker-compose.yml          # Airflow only; does not manage Airbyte
+├── frontend/
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
+├── scripts/inspect_dataset.py      # Local CSV inspection utility
+├── tests/                          # Python unit tests
+├── train.csv                       # Input dataset; left unchanged
+├── servicekey.json                 # Existing credential; ignored by Git
+├── .env.example                    # Safe configuration template
+├── requirements.txt
+└── README.md
 ```
 
-## Credentials and configuration checklist
+## Prerequisites
 
-You will configure these values in a local .env file. It is ignored by Git.
+- Windows 10/11, PowerShell, and VS Code (optional).
+- The existing `.venv` in the project root. Do not create another environment.
+- The existing `servicekey.json` in the project root. Do not copy, rename, overwrite, or commit it.
+- An existing Google Cloud project with BigQuery enabled and access granted to the service account in that key.
+- The existing locally hosted Airbyte deployment and a configured source/destination connection, or the ability to configure that connection in its UI.
+- Docker Desktop only for the Airflow service described in this guide. This repository's Compose file does not install or control Airbyte.
+- Internet access when installing Python packages, pulling the Airflow base image manually, or loading Chart.js from its CDN in the browser.
 
-| Variable | Where to get it / what it controls |
+The current workspace virtual environment is Python 3.14. The standalone dashboard, tests, and CSV inspection run in that environment. The project pins dbt 1.9, so dbt runs in the Airflow image's Python 3.11 environment rather than the workspace Python 3.14 environment.
+
+## Configuration and credentials
+
+Copy `.env.example` to `.env` and fill in the values for your existing services. `.env` is ignored by Git. Do not paste private keys or credentials into README, source files, issue trackers, or logs.
+
+| Variable | Purpose |
 |---|---|
-| GCP_PROJECT_ID | Google Cloud Console project ID, not its display name |
-| GOOGLE_APPLICATION_CREDENTIALS | ./servicekey.json, the existing workspace credential file |
-| BIGQUERY_LOCATION | BigQuery dataset location, for example US; all three datasets must match |
-| BIGQUERY_RAW_DATASET | Dataset Airbyte writes; default food_waste_raw |
-| BIGQUERY_STAGING_DATASET | dbt cleaned view dataset; default food_waste_staging |
-| BIGQUERY_ANALYTICS_DATASET | dbt summary table dataset; default food_waste_analytics |
-| BIGQUERY_RAW_TABLE | Airbyte output table and dbt source identifier; default food_waste_records |
-| AIRBYTE_API_URL | Airbyte API reachable from the Airflow container; local default is http://host.docker.internal:8000/api/public/v1 |
-| AIRBYTE_API_CLIENT_ID | Existing local Airbyte API application client ID, if authentication is enabled |
-| AIRBYTE_API_CLIENT_SECRET | Matching existing local Airbyte client secret; keep it private |
-| AIRBYTE_API_TOKEN | Optional fallback token; leave blank when using client ID/secret |
-| AIRBYTE_CONNECTION_ID | UUID from the Airbyte connection page/address bar |
-| DBT_BIGQUERY_METHOD | service-account for the documented setup |
-| DBT_BIGQUERY_KEYFILE | ./servicekey.json locally; Compose uses the container mount |
+| `GCP_PROJECT_ID` | Existing Google Cloud project ID (not its display name). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Existing local key path; keep `./servicekey.json`. Compose overrides this with its read-only container mount. |
+| `BIGQUERY_LOCATION` | Location shared by the raw, staging, and analytics datasets (for example, `US`). |
+| `BIGQUERY_RAW_DATASET` | BigQuery dataset written by Airbyte; default `food_waste_raw`. |
+| `BIGQUERY_STAGING_DATASET` | dbt cleaned view dataset; default `food_waste_staging`. |
+| `BIGQUERY_ANALYTICS_DATASET` | dbt dashboard tables dataset; default `food_waste_analytics`. |
+| `BIGQUERY_RAW_TABLE` | Airbyte output table and dbt source; default `food_waste_records`. |
+| `DBT_BIGQUERY_METHOD` | Set to `service-account` to use the existing key. |
+| `DBT_BIGQUERY_KEYFILE` | Keep `./servicekey.json`; the Airflow container uses `/run/secrets/servicekey.json`. |
+| `AIRBYTE_API_URL` | Airbyte API base URL reachable from Airflow. For host Airbyte, the example uses `http://host.docker.internal:8000/api/public/v1`. |
+| `AIRBYTE_CONNECTION_ID` | UUID of the existing Airbyte connection that syncs this dataset. |
+| `AIRBYTE_API_CLIENT_ID` and `AIRBYTE_API_CLIENT_SECRET` | Existing Airbyte API application credentials, if the local deployment requires authentication. |
+| `AIRBYTE_API_TOKEN` | Optional existing bearer token fallback. Leave blank when using client ID/secret. |
+| `DASHBOARD_HOST` | Local dashboard bind address; keep `127.0.0.1` for local-only access. |
+| `DASHBOARD_PORT` | Dashboard port; default `8501`. Change it if that port is in use. |
 
-The existing servicekey.json is reused by the local BigQuery API, dbt, Airflow, and Airbyte's BigQuery destination. The file is not read into this documentation, copied, renamed, or moved. The browser only calls the same-origin local API and never receives the key. Airbyte stores its destination credential in its own configuration. Do not put JSON contents in .env or source code.
+The same existing service account is used for the local dashboard API and dbt. Select that existing key in Airbyte's secure BigQuery destination setup. Airbyte keeps its destination credential in Airbyte configuration; do not expose key contents in `.env`.
 
-## 1. Activate the existing environment and install packages
+## One-time setup
 
-Open PowerShell in the project root:
+### 1. Activate the existing venv and install workspace packages
+
+Run from the project root in PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -91,20 +173,20 @@ python --version
 python -m pip install -r requirements.txt
 ```
 
-Do not create another venv. requirements.txt installs the BigQuery client/authentication, dotenv configuration, and dbt Core/dbt-bigquery into the existing venv. The separate Airflow image installs its own dependencies from airflow/requirements.txt. The HTML frontend uses Chart.js from its pinned CDN URL and needs internet access in the browser for interactive charts.
+Do not run `python -m venv` or create another venv. The frontend is plain HTML, CSS, and JavaScript; Chart.js is loaded from the pinned CDN URL in `frontend/index.html`. The Python package requirements are for the BigQuery API, configuration, and local validation.
 
-The local venv is Python 3.14.7. The pinned dbt 1.9 adapter is not compatible with Python 3.14, so run dbt in the provided Airflow Python 3.11 container as described below. The standalone HTML API, CSV inspection utility, and unit tests use the existing venv.
-
-## 2. Create the local environment file
+### 2. Create the ignored `.env` configuration
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-Fill the project, dataset, and existing Airbyte connection values. Keep .env private. Leave GOOGLE_APPLICATION_CREDENTIALS and DBT_BIGQUERY_KEYFILE as ./servicekey.json; it points at the credential file already in this workspace.
+Set the existing project ID, dataset IDs, Airbyte connection ID, and any existing Airbyte API authentication values. Retain `GOOGLE_APPLICATION_CREDENTIALS=./servicekey.json`, `DBT_BIGQUERY_METHOD=service-account`, and `DBT_BIGQUERY_KEYFILE=./servicekey.json`. Do not put the JSON key contents into `.env`.
 
-The profile template reads environment variables. Make the standard local dbt profile and the separate read-only Airflow profile mount:
+### 3. Prepare the dbt profiles
+
+The profile template references environment variables, not literal secrets. dbt in Airflow uses the mounted copy at `/home/airflow/.dbt/profiles.yml`; the local copy is available for supported Python versions.
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.dbt"
@@ -112,58 +194,36 @@ Copy-Item config/profiles.yml.example "$env:USERPROFILE\.dbt\profiles.yml"
 Copy-Item config/profiles.yml.example config/profiles.yml
 ```
 
-config/profiles.yml is git-ignored. It contains only environment-variable references, not secrets.
+`config/profiles.yml` is ignored by Git. It is mounted read-only into Airflow. If updating the profile template later, refresh both copies.
 
-## 3. Set up Google Cloud and BigQuery
+### 4. Verify the existing BigQuery setup
 
-1. Use the Google Cloud project and service account that correspond to the existing servicekey.json. Copy only the project ID into GCP_PROJECT_ID.
-2. Confirm the BigQuery API is enabled for that project.
-3. Confirm food_waste_raw, food_waste_staging, and food_waste_analytics exist in the same location. Create only any missing datasets in the existing project, and set their IDs/location in .env.
-4. Confirm the existing service account has BigQuery Job User at project level and BigQuery Data Editor on these datasets. If permissions are missing, ask the project administrator to grant them to the existing account. Do not create another service account or download another key.
-5. Set GOOGLE_APPLICATION_CREDENTIALS=./servicekey.json, DBT_BIGQUERY_METHOD=service-account, and DBT_BIGQUERY_KEYFILE=./servicekey.json.
+1. Use the existing Google Cloud project associated with `servicekey.json`; put only its project ID in `.env`.
+2. Confirm the BigQuery API is enabled in that project.
+3. Confirm these datasets exist in the same BigQuery location: raw (`food_waste_raw`), staging (`food_waste_staging`), and analytics (`food_waste_analytics`). If your IDs differ, update `.env` consistently.
+4. Confirm the service account already in `servicekey.json` has BigQuery Job User on the project and sufficient data permissions on the datasets. Ask the project administrator to grant missing permissions to that existing account; do not create another service account or download another key.
+5. Ensure the account can create/replace the staging view and analytics tables used by dbt.
 
-The raw dataset is the Airbyte landing zone. dbt creates a cleaned staging view and the analytics tables. The dbt project uses the project ID, datasets, raw table, and existing credential file from environment variables.
+## Configure the existing Airbyte connection
 
-## 4. Set up Airbyte and give it the CSV
+Use your current self-hosted Airbyte UI and deployment. Do not install another Airbyte instance. The Airbyte File source reads a path visible inside the Airbyte source worker, so the workspace CSV must be available through the deployment's existing local filesystem mount.
 
-Use the existing local, self-hosted Airbyte deployment. Do not install or recreate it. The official [File connector guide](https://docs.airbyte.com/integrations/sources/file) describes the local mount and source fields. The [Airbyte API docs](https://docs.airbyte.com/developers/api-documentation) describe the self-managed API base URL and authentication.
+1. In the existing Airbyte UI, inspect Sources, Destinations, and Connections. Reuse an existing File/CSV source, BigQuery destination, and connection if they already match the project.
+2. If a File source is needed, configure the File connector with dataset name `food_waste_records`, CSV format, local filesystem storage, and the worker-visible file URL (commonly `/local/train.csv`). Confirm the Airbyte worker can actually read that mounted file and that discovery finds the expected 12 columns.
+3. If the BigQuery destination needs configuration, select the existing `servicekey.json` through Airbyte's secure credential field. Set the existing project ID, BigQuery location, raw dataset, and output table `food_waste_records`. Do not copy credential contents into project files.
+4. Connect the source and destination. Use the raw dataset namespace and, for this static CSV snapshot, `Full Refresh | Overwrite`. Run one manual sync from Airbyte and confirm that `food_waste_raw.food_waste_records` (or your configured equivalent) contains rows.
+5. Copy the existing connection UUID into `AIRBYTE_CONNECTION_ID` in `.env`.
+6. Confirm the local Airbyte API base URL and whether authentication is enabled. For the documented local setup, Airflow reaches a host service through `http://host.docker.internal:8000/api/public/v1`; use the actual URL and port for your deployment. If authentication is enabled, provide an existing API application's client ID and secret, or a valid configured bearer token. The DAG requests a short-lived token when client ID/secret are supplied.
 
-The usual local API base URL is http://localhost:8000/api/public/v1. From inside the Airflow container, use http://host.docker.internal:8000/api/public/v1. If your existing deployment uses another host or port, use its configured URL. The local API ports were not reachable from this implementation session, and there was no Airbyte configuration file in the workspace, so confirm the URL and connection ID in your running Airbyte UI.
+The Airbyte API on this workspace was not reachable during project implementation. Confirm the existing deployment's API URL, auth settings, worker file mount, and connection ID in your own running Airbyte UI before starting the scheduled pipeline. The project does not invent these instance-specific values.
 
-### Reuse the existing connection or configure it in the existing Airbyte UI
+## Run the pipeline
 
-1. Open the already running Airbyte UI and look for a File/CSV source, BigQuery destination, and connection. Reuse them if present; do not restart Airbyte.
-2. If a source is still needed, use the File connector with Dataset Name food_waste_records, File Format CSV, Storage Provider Local Filesystem, and URL /local/train.csv. Verify the source worker can read the workspace CSV through its existing local mount and that schema discovery shows the 12 expected columns.
-3. If the BigQuery destination is not configured, set its project ID, BigQuery location, and raw dataset food_waste_raw. Select the existing workspace credential file servicekey.json in Airbyte's secure credential field. Do not copy its contents into project files or logs.
-4. Connect the source to that BigQuery destination. Set destination namespace to food_waste_raw and output table to food_waste_records. Use Full Refresh | Overwrite for this static CSV. Run Sync Now once and verify the raw table in BigQuery.
-5. Copy the existing connection UUID from its Airbyte details/address bar into AIRBYTE_CONNECTION_ID in .env.
-6. Copy the connection UUID into AIRBYTE_CONNECTION_ID in .env. If API authentication is enabled, reuse the existing application client ID/secret from the local Airbyte user's Settings > Account > Applications. If the deployment requires authentication and no API application exists, create one in that existing Airbyte instance; do not reinstall Airbyte. If API authentication is disabled, leave the client ID/secret blank. The Airflow integration requests a short-lived token for each API call.
+> The following Docker commands are instructions for you to run manually. This project setup does not run Docker commands on your behalf. The Compose file here defines Airflow only; keep your current Airbyte deployment as-is.
 
-This project does not start, stop, upgrade, or recreate Airbyte. It only calls the configured API to trigger and poll the selected connection.
+### 1. Start Airflow
 
-## 5. Configure and run dbt
-
-The dbt profile must be in the standard user profile directory at %USERPROFILE%\.dbt\profiles.yml. dbt itself does not automatically read .env. The following dotenv command loads the workspace .env for each local dbt command:
-
-```powershell
-python -m dotenv run -- dbt debug --project-dir dbt --profiles-dir "$env:USERPROFILE\.dbt"
-python -m dotenv run -- dbt run --project-dir dbt --profiles-dir "$env:USERPROFILE\.dbt"
-python -m dotenv run -- dbt test --project-dir dbt --profiles-dir "$env:USERPROFILE\.dbt"
-python -m dotenv run -- dbt build --project-dir dbt --profiles-dir "$env:USERPROFILE\.dbt"
-```
-
-Those local dbt commands require a Python version supported by dbt 1.9. The existing venv is Python 3.14, so use the Airflow container commands below for this workspace instead.
-
-Models:
-- staging: stg_food_waste, a view with standardized categories/experience, safe casts, and duplicate handling.
-- analytics: daily_waste_summary, category_waste_summary, monthly_waste_summary.
-- tests: identifier uniqueness/not-null, date and measured-waste not-null, accepted category/experience values, and numeric/flag ranges.
-
-Valid measured food_waste_kg is preserved; the project does not impute or cap observed waste.
-
-## 6. Build and start Airflow (Docker commands)
-
-Before Compose starts, ensure .env is filled in and config/profiles.yml exists. Docker Desktop must be running. Run each command below from the project root (the folder containing docker/airflow/docker-compose.yml).
+Make sure `.env`, `config/profiles.yml`, and the existing `servicekey.json` are in place. Start Docker Desktop manually, then run these commands from the project root:
 
 ```powershell
 docker compose -f docker/airflow/docker-compose.yml build
@@ -171,101 +231,122 @@ docker compose -f docker/airflow/docker-compose.yml up -d
 docker compose -f docker/airflow/docker-compose.yml ps
 ```
 
-- build creates the Airflow image with Airflow, dbt-bigquery, BigQuery client, and the DAG runtime packages.
-- up -d starts the Airflow standalone scheduler and web UI on port 8080.
-- ps shows whether the Airflow container is running.
+The Compose service runs Airflow standalone on port 8080, mounts the DAGs and dbt project, mounts the dbt profile read-only, and mounts the existing service key read-only. It does not create, restart, or manage Airbyte.
 
-Open http://localhost:8080. The initial Airflow username/password are printed by:
+Open [http://localhost:8080](http://localhost:8080). The standalone Airflow login is generated by Airflow and printed in its startup logs:
 
 ```powershell
 docker compose -f docker/airflow/docker-compose.yml logs airflow
 ```
 
-Find the generated standalone login in the startup log. In the UI, unpause cafeteria_food_waste_pipeline and click Trigger DAG. Open Grid or Graph and inspect task logs. Expected sequence: Airbyte trigger, wait for successful sync, dbt build (models and tests), BigQuery analytics-table validation.
+Sign in, unpause `cafeteria_food_waste_pipeline` if it is paused, and select **Trigger DAG**. Inspect the Grid/Graph view and task logs. Expected task order:
 
-The Airflow task runs dbt in Python 3.11 and reads its mounted profile from /home/airflow/.dbt. To manually run a dbt command in the already running container, use these commands from the project root:
+1. `trigger_airbyte_sync` starts the configured Airbyte connection.
+2. `wait_for_airbyte_sync` polls until the Airbyte job succeeds or fails.
+3. `dbt_build` builds staging and analytics models and executes dbt tests.
+4. `validate_analytics_tables` confirms all three analytics tables have rows.
+
+The DAG is scheduled daily, has catchup disabled, and can also be triggered manually. It retries failed tasks twice. A successful DAG run is needed before the dashboard can load analytics tables.
+
+### 2. Optional dbt commands inside the running Airflow container
+
+The workspace venv is Python 3.14, while the pinned dbt 1.9 packages run in the Airflow image's Python 3.11 dbt environment. Do not use the local venv for these dbt commands. From the project root, run the following manually after Airflow is up:
 
 ```powershell
 docker compose -f docker/airflow/docker-compose.yml exec airflow dbt debug --project-dir /opt/food-waste/dbt --profiles-dir /home/airflow/.dbt
-docker compose -f docker/airflow/docker-compose.yml exec airflow dbt run --project-dir /opt/food-waste/dbt --profiles-dir /home/airflow/.dbt
-docker compose -f docker/airflow/docker-compose.yml exec airflow dbt test --project-dir /opt/food-waste/dbt --profiles-dir /home/airflow/.dbt
 docker compose -f docker/airflow/docker-compose.yml exec airflow dbt build --project-dir /opt/food-waste/dbt --profiles-dir /home/airflow/.dbt
 ```
 
-The DAG normally runs dbt build for you; manual commands are for checking dbt or running it outside a DAG run.
+`dbt build` is normally run by the DAG; these commands are useful for diagnosing the connection or manually rebuilding models.
 
-## 7. Start the standalone HTML dashboard
+## Run the HTML dashboard
 
-After a successful DAG run, return to PowerShell in the project root with .venv activated:
+After the DAG completes successfully, open a separate PowerShell window in the project root, activate the existing venv, and start the local server:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 python -m backend.server
 ```
 
-Open http://127.0.0.1:8501. The Python API loads .env and authenticates to BigQuery with the existing servicekey.json. It serves the standalone files in frontend/ and provides same-origin JSON endpoints. The dashboard displays live KPI totals, daily and monthly trends, category comparisons, and a recent-record table. Interactive Chart.js charts support hover details and legends. The question panel offers six predefined queries and shows each query's SQL for transparency. It never accepts arbitrary SQL. The API listens only on 127.0.0.1 by default; use DASHBOARD_PORT in .env to change the port.
+Open [http://127.0.0.1:8501](http://127.0.0.1:8501). The API reads `.env`, authenticates to BigQuery with the existing `servicekey.json`, serves the files in `frontend/`, and exposes these same-origin endpoints:
 
-To stop the dashboard, press Ctrl+C in its PowerShell window. No Streamlit process or server is used.
+| Endpoint | Purpose |
+|---|---|
+| `/api/health` | Local API health check; does not query BigQuery. |
+| `/api/questions` | Lists the supported analytics questions. |
+| `/api/dashboard` | Returns live KPI, daily, category, and monthly analytics rows. |
+| `/api/question?id=highest_category` | Runs a supported predefined question query. |
 
-## 8. Verify the project
+The dashboard includes KPI cards, daily and monthly trends, category distribution, a recent daily table, and a question panel with query results and SQL details. It uses real BigQuery analytics tables, not mock data. If port 8501 is occupied, set `DASHBOARD_PORT=8503` (or another free port) in `.env`, restart the API, and open the matching `http://127.0.0.1:<port>` address. Press **Ctrl+C** in the dashboard PowerShell window to stop the API.
 
-Run local checks from the project root with .venv active:
+## Tests and validation
+
+With the existing venv activated, run from the project root:
 
 ```powershell
 python scripts/inspect_dataset.py
 python -m unittest discover -s tests -v
+python -m pip check
 ```
 
-The tests cover the actual CSV schema/counts, mock Airbyte API calls, verify fixed analytics queries and JSON conversion, and check the standalone frontend. Cloud sync, dbt build, and Airflow execution require the existing configured services.
+The unit suite covers dataset shape and inspection, Airbyte API request behavior using mocks, fixed BigQuery query selection, BigQuery value-to-JSON conversion, and frontend/API source expectations. Unit tests do not trigger Airbyte or write to BigQuery. End-to-end validation requires the existing Airbyte API, service account permissions, BigQuery datasets, and a successful Airflow DAG run.
 
-## Complete run order checklist
+Useful manual checks:
 
-1. Start Docker Desktop.
-2. Activate the existing .venv and install requirements.txt.
-3. Copy .env.example to .env; create the user dbt profile and the ignored Compose profile copy.
-4. Use the existing Google Cloud project and servicekey.json. Confirm BigQuery API, datasets, and existing service-account permissions; fill project/dataset values in .env.
-5. Open the already running local Airbyte instance. Reuse its File source, BigQuery destination, and connection if configured. Select the existing servicekey.json for the destination, verify the local CSV source/mount, run one sync, and fill in the existing connection ID and API credentials if authentication is enabled.
-6. From the project root, build/start Airflow with the Docker Compose commands.
-7. Open Airflow, trigger the DAG, monitor tasks, and verify all analytics tables contain rows.
-8. Start the HTML/API server and review the dashboard/questions at http://127.0.0.1:8501.
-9. When finished, stop Airflow. Leave the existing Airbyte deployment running.
+```powershell
+Invoke-RestMethod http://127.0.0.1:8501/api/health
+Invoke-RestMethod http://127.0.0.1:8501/api/questions
+```
 
-To stop the Airflow container while keeping its persisted state:
+Use the actual dashboard port in those URLs if `DASHBOARD_PORT` was changed.
+
+## Data model and cleaning
+
+The source `train.csv` contains 911 records and 12 columns. It is kept unchanged. It contains a source ID, date, meals and staffing counts, temperature and humidity readings, weekday and special-event fields, past waste, staff experience, waste category, and measured `food_waste_kg`.
+
+| Layer | Model/table | Materialization | Role |
+|---|---|---|---|
+| Raw | `food_waste_raw.food_waste_records` | Airbyte destination table | Landing copy of source CSV. |
+| Staging | `food_waste_staging.stg_food_waste` | View | Safe casts, normalized known category/experience casing, sentinel handling, deduplication, and required-field filtering. |
+| Analytics | `food_waste_analytics.daily_waste_summary` | Table | Daily totals and descriptive measures used by the dashboard. |
+| Analytics | `food_waste_analytics.category_waste_summary` | Table | Waste totals and shares by category. |
+| Analytics | `food_waste_analytics.monthly_waste_summary` | Table | Monthly observed waste totals. |
+
+The CSV inspection found 12 expected fields, no empty cells, no exact duplicate rows, and unique IDs. Some category and experience values have inconsistent casing; `staff_experience` has 164 `nan` sentinels. dbt uses `SAFE_CAST`, normalizes known values, maps missing categorical sentinels to `Unknown`, deduplicates by ID, and filters invalid required IDs/dates or missing/negative measured waste. Valid measured `food_waste_kg` is preserved. Waste is not imputed or capped, and no forecast is calculated.
+
+The source date range is 2022-01-01 through 2024-09-26. The observed ranges include meals served 100-4730, temperature -10.37 to 60 C, humidity 30.12-89.98%, and measured food waste 10.82-274.33 kg. These are descriptions of the supplied source data, not validation limits imposed on the dashboard.
+
+## Troubleshooting
+
+| Symptom | Checks |
+|---|---|
+| Airbyte File source cannot read `/local/train.csv` | Confirm that the existing Airbyte worker can see the host CSV through its configured local mount. A Windows workspace path is not automatically visible inside a container. Check connector logs and the source URL. |
+| Airbyte API returns 401 | Check the API base URL, whether auth is enabled, the existing client ID/secret, and Airbyte API application permissions. Do not use an expired bearer token. |
+| Airbyte sync fails | Inspect the Airbyte connection job log, destination credential configuration, raw dataset location, table/namespace, and service account permissions. |
+| dbt reports that its source table is missing | Confirm a successful sync created the configured raw dataset/table and that `BIGQUERY_RAW_DATASET` and `BIGQUERY_RAW_TABLE` match. |
+| dbt authentication or permission error | Check project ID, BigQuery API enablement, dataset location, profile mount, key path, and permissions for the existing service account. |
+| Airflow cannot reach Airbyte | From the Airflow container, `localhost` points at that container. Use the host-reachable Airbyte URL (commonly `host.docker.internal`) and verify the actual local API port. |
+| Airflow cannot find the profile/key | Ensure `config/profiles.yml` and `servicekey.json` exist at the workspace root and the Compose bind mounts resolve. The container key path is `/run/secrets/servicekey.json`. |
+| DAG succeeds but dashboard analytics are empty | Confirm the DAG's analytics validation passed and the `.env` project, location, and analytics dataset match dbt's output. |
+| Dashboard reports BigQuery analytics unavailable | Verify `.env`, service key readability, service account permissions, and that all analytics tables exist and contain rows. The API logs exception types, not credentials or exception contents. |
+| Charts are blank but tables load | Check browser connectivity to the pinned Chart.js CDN script and the browser console, then refresh. |
+| Dashboard port is in use | Set `DASHBOARD_PORT` in `.env` to an available port, restart `python -m backend.server`, and open that port. |
+| PowerShell blocks venv activation | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that PowerShell session, then activate `.venv`. |
+
+## Security notes
+
+- `.env`, `config/profiles.yml`, `servicekey.json`, and runtime/cache files are excluded from Git.
+- Keep the existing service account key at the workspace root. Never paste its contents into source, `.env`, README, or logs.
+- The Airflow Compose configuration mounts the key read-only. The dashboard binds to `127.0.0.1` by default; do not expose this development API to an untrusted network.
+- The dashboard API supports fixed query IDs and does not accept arbitrary SQL. Avoid forwarding raw stack traces or credential values to the browser.
+- Do not use real service credentials in screenshots, source control, or issue reports.
+
+## Stop services
+
+Stop the dashboard with **Ctrl+C** in its PowerShell window. To stop this project's Airflow service manually while preserving its persisted state, run from the project root:
 
 ```powershell
 docker compose -f docker/airflow/docker-compose.yml down
 ```
 
-Leave the existing Airbyte deployment running. This project does not stop or uninstall it.
-
-## Dataset details and cleaning
-
-The source contains 12 columns:
-- ID: source record identifier.
-- date: observation date.
-- meals_served and kitchen_staff: meal and staffing counts.
-- temperature_C and humidity_percent: environmental readings.
-- day_of_week and special_event: source weekday code and event flag.
-- past_waste_kg: supplied historical waste field.
-- staff_experience and waste_category: categorical values.
-- food_waste_kg: actual measured waste used by the summaries.
-
-CSV fields are text. The inspection utility reports physical CSV types, inferred logical types, missing/sentinel values, invalid numeric/date values, duplicates, category frequencies, and numeric ranges. The source date range is 2022-01-01 to 2024-09-26. Observed ranges include meals 100-4730, temperature -10.37 to 60 C, humidity 30.12-89.98%, and food waste 10.82-274.33 kg. Observed extremes are not clipped. dbt uses SAFE_CAST, normalizes known category/experience casing, maps missing categorical sentinels to Unknown, deduplicates by ID, and excludes invalid required keys/dates or missing/negative food waste. It does not invent missing waste measurements.
-
-## Troubleshooting
-
-- Airbyte source test cannot read the file: check the deployment's shared host mount, Windows drive-path syntax, and that the URL begins /local/.
-- Airbyte API 401: check client ID/secret and API base URL. The DAG fetches a short-lived token using the app credentials; do not rely on an expired token.
-- Airbyte sync fails: inspect the source/destination connection log, BigQuery permission, raw dataset location, destination namespace, and target table.
-- dbt cannot find the raw table: verify Airbyte created food_waste_raw.food_waste_records and that BIGQUERY_RAW_DATASET/BIGQUERY_RAW_TABLE match it.
-- dbt authentication fails: check the service-account path, role grants, project ID, API enablement, and BigQuery location.
-- Airflow cannot connect to Airbyte: within a container, localhost refers to that same container. For local Airbyte use host.docker.internal in AIRBYTE_API_URL.
-- Airflow has no profile or key file: create config/profiles.yml and check that GOOGLE_APPLICATION_CREDENTIALS points to an existing local file Compose can mount.
-- Dashboard API shows a BigQuery error: confirm Airbyte sync and DAG build succeeded, .env values are correct, servicekey.json is readable, and analytics tables have data.
-- Browser charts do not appear: check that the browser has internet access for the pinned Chart.js CDN script, then refresh the page.
-- Port 8501 is occupied: set DASHBOARD_PORT to another local port in .env, restart `python -m backend.server`, and open that port in the browser.
-- Docker Compose commands report missing files: execute them from project root and ensure config/profiles.yml and the credentials path exist.
-
-## Security and limitations
-
-Never commit .env, servicekey.json, API client secrets, or access tokens. servicekey.json is explicitly ignored by Git and remains in its current location. The local API binds to loopback and exposes only fixed query endpoints; do not expose it to an untrusted network. The dataset is a static CSV snapshot; the connection uses full refresh overwrite. No test.csv is included. There is no ML or forecasting. Existing Airbyte and BigQuery services require configured connection/project values; no external execution result is fabricated.
-
+That command applies only to the Airflow Compose project. Leave the pre-existing Airbyte deployment running unless you separately choose to manage it.
